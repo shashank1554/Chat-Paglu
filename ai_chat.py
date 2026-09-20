@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 client = None
 backup_client = None
 
-OPENROUTER_DEFAULT_FREE_MODEL = "openai/gpt-oss-20b:free"
+OPENROUTER_DEFAULT_FREE_MODEL = "openrouter/free"
 OPENROUTER_CONFIGURED_MODEL = os.environ.get("OPENROUTER_MODEL", "").strip()
 OPENROUTER_MODEL = (
     OPENROUTER_CONFIGURED_MODEL
