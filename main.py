@@ -357,9 +357,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             response = get_ai_response(user_id_str, message_text)
         
-        conversation_history[user_id_str].append({"role": "user", "content": message_text})
-        conversation_history[user_id_str].append({"role": "assistant", "content": response})
-        
         await context.bot.send_message(chat_id=chat_id, text=response)
 
 

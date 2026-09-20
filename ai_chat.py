@@ -18,12 +18,9 @@ client = None
 backup_client = None
 
 OPENROUTER_DEFAULT_FREE_MODEL = "openrouter/free"
-OPENROUTER_CONFIGURED_MODEL = os.environ.get("OPENROUTER_MODEL", "").strip()
-OPENROUTER_MODEL = (
-    OPENROUTER_CONFIGURED_MODEL
-    if OPENROUTER_CONFIGURED_MODEL.endswith(":free") or OPENROUTER_CONFIGURED_MODEL == "openrouter/free"
-    else OPENROUTER_DEFAULT_FREE_MODEL
-)
+# Always use OpenRouter's dynamic free router. Render environment overrides may
+# still contain an old model slug, so paid or retired model values are ignored.
+OPENROUTER_MODEL = OPENROUTER_DEFAULT_FREE_MODEL
 OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "https://github.com")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_KEY_INDEX = 0
