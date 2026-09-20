@@ -23,6 +23,9 @@ services:
       - key: OPENROUTER_API_KEYS
         scope: run
         sync: false
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-oss-20b:free
+        scope: run
       - key: OPEN_ROUTER_KEY_1
         scope: run
         sync: false

@@ -17,7 +17,13 @@ logger = logging.getLogger(__name__)
 client = None
 backup_client = None
 
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+OPENROUTER_DEFAULT_FREE_MODEL = "openai/gpt-oss-20b:free"
+OPENROUTER_CONFIGURED_MODEL = os.environ.get("OPENROUTER_MODEL", "").strip()
+OPENROUTER_MODEL = (
+    OPENROUTER_CONFIGURED_MODEL
+    if OPENROUTER_CONFIGURED_MODEL.endswith(":free") or OPENROUTER_CONFIGURED_MODEL == "openrouter/free"
+    else OPENROUTER_DEFAULT_FREE_MODEL
+)
 OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "https://github.com")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_KEY_INDEX = 0
@@ -172,12 +178,17 @@ def call_openrouter(messages, system_instruction, temperature=0.95):
             "Authorization": f"Bearer {active_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": OPENROUTER_SITE_URL,
-            "X-Title": "Chat-Paglu",
+            "X-OpenRouter-Title": "Chat-Paglu",
         }
 
         try:
             response = None
-            response = requests.post(OPENROUTER_BASE_URL, headers=headers, json=payload, timeout=60)
+            response = requests.post(
+                url=OPENROUTER_BASE_URL,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=60,
+            )
             if response.status_code in (401, 403, 429):
                 last_error = f"OpenRouter API error {response.status_code}: {response.text[:300]}"
                 rotate_openrouter_key()
