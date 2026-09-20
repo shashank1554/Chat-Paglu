@@ -5,6 +5,7 @@ import random
 import time
 import json
 import sys
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
@@ -33,7 +34,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN") or "").strip()
+if len(TELEGRAM_BOT_TOKEN) >= 2 and TELEGRAM_BOT_TOKEN[0] == TELEGRAM_BOT_TOKEN[-1] and TELEGRAM_BOT_TOKEN[0] in "\"'":
+    TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN[1:-1].strip()
 ADMIN_USERNAME = "CoffinWifi"
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "").strip()
 ADMIN_DATA_FILE = "admin_data.json"
@@ -1396,6 +1399,11 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", TELEGRAM_BOT_TOKEN):
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is missing or invalid. Set a fresh BotFather token in Render Environment."
+        )
+
     load_admin_data()
     load_feature_data()
     start_health_server()
