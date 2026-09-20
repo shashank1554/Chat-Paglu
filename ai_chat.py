@@ -285,10 +285,12 @@ def call_ai_with_fallback(contents, system_instruction, temperature=0.95):
         logger.warning(f"OpenRouter failed, falling back to Gemini: {exc}")
 
     if types is not None:
-        return call_gemini_with_fallback(contents, system_instruction, temperature)
+        response = call_gemini_with_fallback(contents, system_instruction, temperature)
+        if response:
+            return response
 
-    logger.error("No AI provider available. Please set OPENROUTER_API_KEY or GEMINI_API_KEY.")
-    return OpenRouterResponse("Hmm, kya hua? 😅")
+    logger.error("No AI provider available. Check OpenRouter keys and optional Gemini keys.")
+    return OpenRouterResponse("AI service temporarily unavailable. Please try again in a moment.")
 
 
 conversation_history = {}

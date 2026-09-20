@@ -7,6 +7,7 @@ import json
 import sys
 import re
 import threading
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -63,6 +64,7 @@ group_auto_reply = True
 tracked_groups = set()  # Track group/channel IDs for broadcasting
 group_data = {}
 account_data = {}
+processed_update_ids = deque(maxlen=1000)
 
 GENTLE_REJECTION_MESSAGES = [
     "Hey! Aise baatein nahi karte na. 🥺",
@@ -300,6 +302,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_enabled:
         return
+
+    if update.update_id in processed_update_ids:
+        logger.warning("Ignoring duplicate Telegram update %s", update.update_id)
+        return
+    processed_update_ids.append(update.update_id)
     
     user_id = update.effective_user.id
     username = update.effective_user.username
