@@ -331,8 +331,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=response)
             return
         
-        response = get_group_response(user_id_str, message_text)
-        add_to_group_history(user_id_str, message_text, response)
+        display_name = update.effective_user.full_name or username or user_id_str
+        response = get_group_response(chat_id_str, display_name, message_text)
         await context.bot.send_message(chat_id=chat_id, text=response)
     else:
         # Private chat
