@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+user_profiles.json
+group_data.json
+account_data.json
+bot_data.json

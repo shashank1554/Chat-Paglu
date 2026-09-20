@@ -1,18 +1,55 @@
 services:
-  - type: worker
+  - type: web
     name: naina-bot
     env: python
     plan: free
     branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
+        scope: run
+        sync: false
+      - key: OWNER_CHAT_ID
         scope: run
         sync: false
       - key: GEMINI_API_KEY
         scope: run
         sync: false
       - key: GEMINI_API_KEY_BACKUP
+        scope: run
+        sync: false
+      - key: OPENROUTER_API_KEYS
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_1
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_2
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_3
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_4
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_5
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_6
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_7
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_8
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_9
+        scope: run
+        sync: false
+      - key: OPEN_ROUTER_KEY_10
         scope: run
         sync: false

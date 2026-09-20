@@ -5,8 +5,13 @@ import random
 import time
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timedelta, timezone
+import hashlib
+from types import SimpleNamespace
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, JobQueue
 
 # Load environment variables from .env file if it exists
@@ -18,7 +23,8 @@ from ai_chat import (
     is_abuse_message, get_abuse_response, is_advice_message,
     save_user_preference, get_custom_abuse_response, get_stats, get_lover_response,
     conversation_history, get_random_joke, get_random_quote, get_daily_tip,
-    get_random_compliment, get_random_fortune, get_random_dare, get_random_truth
+    get_random_compliment, get_random_fortune, get_random_dare, get_random_truth,
+    get_story_prompt, get_poem, get_motivation_line, get_user_profile, clear_user_profile
 )
 
 logging.basicConfig(
@@ -29,8 +35,12 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_USERNAME = "CoffinWifi"
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "").strip()
 ADMIN_DATA_FILE = "admin_data.json"
 BOT_DATA_FILE = "bot_data.json"
+GROUP_DATA_FILE = "group_data.json"
+ACCOUNT_DATA_FILE = "account_data.json"
+PORT = int(os.environ.get("PORT", "10000"))
 
 BOT_START_TIME = time.time()
 
@@ -48,6 +58,8 @@ blocked_naughty_users = {}
 bot_enabled = True
 group_auto_reply = True
 tracked_groups = set()  # Track group/channel IDs for broadcasting
+group_data = {}
+account_data = {}
 
 GENTLE_REJECTION_MESSAGES = [
     "Hey! Aise baatein nahi karte na. 🥺",
@@ -66,6 +78,60 @@ RUDE_REJECTION_MESSAGES = [
 ]
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/health", "/health/", "/helath", "/helath/"):
+            payload = json.dumps({"status": "ok", "service": "naina-bot"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health server listening on port %s", PORT)
+    return server
+
+
+def load_json_file(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+                return data if isinstance(data, type(default)) else default
+    except Exception as exc:
+        logger.error("Could not load %s: %s", path, exc)
+    return default
+
+
+def save_json_file(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.error("Could not save %s: %s", path, exc)
+
+
+def load_feature_data():
+    global group_data, account_data
+    group_data = load_json_file(GROUP_DATA_FILE, {})
+    account_data = load_json_file(ACCOUNT_DATA_FILE, {})
+
+
+def save_feature_data():
+    save_json_file(GROUP_DATA_FILE, group_data)
+    save_json_file(ACCOUNT_DATA_FILE, account_data)
+
+
 def resolve_user_id(identifier: str) -> str:
     identifier = identifier.replace("@", "").strip().lower()
     if identifier.isdigit():
@@ -73,6 +139,72 @@ def resolve_user_id(identifier: str) -> str:
     if identifier in username_to_id:
         return str(username_to_id[identifier])
     return None
+
+
+def get_replied_user(update: Update):
+    reply = update.message.reply_to_message if update.message else None
+    if reply and reply.from_user:
+        add_username_mapping(reply.from_user.id, reply.from_user.username)
+        return reply.from_user
+    return None
+
+
+def resolve_target(update: Update, argument_index: int = 0):
+    replied_user = get_replied_user(update)
+    if replied_user:
+        return replied_user
+    if len(update.message.text.split()) > argument_index + 1:
+        target_id = resolve_user_id(update.message.text.split()[argument_index + 1])
+        if target_id:
+            return SimpleNamespace(id=int(target_id), username=None, first_name=target_id)
+    return None
+
+
+def is_group(update: Update) -> bool:
+    return update.effective_chat.type in ("group", "supergroup")
+
+
+async def require_group_admin(update: Update) -> bool:
+    if not is_group(update):
+        await update.message.reply_text("This command works only inside a group.")
+        return False
+    member = await update.effective_chat.get_member(update.effective_user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("Only group admins can use this command.")
+        return False
+    return True
+
+
+def group_state(chat_id: int):
+    state = group_data.setdefault(str(chat_id), {"warnings": {}, "muted_until": {}, "titles": {}})
+    state.setdefault("warnings", {})
+    state.setdefault("muted_until", {})
+    state.setdefault("titles", {})
+    return state
+
+
+def parse_duration(value: str):
+    if not value:
+        return None
+    if value.lower() in ("permanent", "perm"):
+        return None
+    units = {"m": 60, "h": 3600, "d": 86400}
+    try:
+        return int(value[:-1]) * units[value[-1].lower()]
+    except (ValueError, KeyError):
+        return None
+
+
+def account_for(user_id: int):
+    account = account_data.setdefault(str(user_id), {
+        "coins": 0, "gems": 0, "premium": False, "xp": 0,
+        "password_hash": None, "deleted_accounts": {}
+    })
+    return account
+
+
+def password_hash(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
 async def keep_alive_job(context: ContextTypes.DEFAULT_TYPE):
@@ -111,7 +243,11 @@ def load_admin_data():
                 blocked_naughty_users = data.get('blocked_naughty_users', {})
                 bot_enabled = data.get('bot_enabled', True)
                 group_auto_reply = data.get('group_auto_reply', True)
-                logger.info(f"Loaded admin data. Admin chat ID: {admin_chat_id}, Admin IDs: {admin_ids}")
+        if OWNER_CHAT_ID:
+            admin_chat_id = OWNER_CHAT_ID
+            admin_ids.add(OWNER_CHAT_ID)
+            save_admin_data()
+        logger.info(f"Loaded admin data. Admin chat ID: {admin_chat_id}, Admin IDs: {admin_ids}")
     except Exception as e:
         logger.error(f"Error loading admin data: {e}")
 
@@ -716,6 +852,306 @@ async def handle_permission_callback(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text(f"❌ Dirty talk denied for {requester_id}.")
 
 
+async def baka_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deliver a private whisper to a user who has already opened the bot."""
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /baka <username/user_id> <message>")
+        return
+    target_id = resolve_user_id(context.args[0])
+    if not target_id:
+        await update.message.reply_text("I do not know that user yet. Ask them to /start the bot first.")
+        return
+    text = " ".join(context.args[1:])
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_id),
+            text=f"🫀 Whisper from {update.effective_user.first_name}:\n{text}"
+        )
+        await update.message.reply_text("🫶 Whisper sent privately.")
+    except Exception:
+        await update.message.reply_text("I could not deliver it. The recipient must start the bot in DM first.")
+
+
+async def warn_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /warn <user>.")
+        return
+    state = group_state(update.effective_chat.id)
+    key = str(target.id)
+    state["warnings"][key] = int(state["warnings"].get(key, 0)) + 1
+    count = state["warnings"][key]
+    save_feature_data()
+    if count >= 3:
+        try:
+            await context.bot.ban_chat_member(update.effective_chat.id, target.id)
+            await update.message.reply_text(f"🚫 {target.first_name} reached 3 warnings and was banned.")
+        except Exception as exc:
+            await update.message.reply_text(f"Warning 3 recorded, but I could not ban that user: {exc}")
+    else:
+        await update.message.reply_text(f"⚠️ Warning {count}/3 for {target.first_name}.")
+
+
+async def warns_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /warns <user>.")
+        return
+    count = group_state(update.effective_chat.id)["warnings"].get(str(target.id), 0)
+    await update.message.reply_text(f"⚠️ {target.first_name} has {count}/3 warnings.")
+
+
+async def unwarn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /unwarn <user>.")
+        return
+    state = group_state(update.effective_chat.id)
+    key = str(target.id)
+    state["warnings"][key] = max(0, int(state["warnings"].get(key, 0)) - 1)
+    save_feature_data()
+    await update.message.reply_text(f"✅ Removed one warning from {target.first_name}.")
+
+
+async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /mute <user> [30m|2h|1d].")
+        return
+    duration = context.args[1] if len(context.args) > 1 and not update.message.reply_to_message else (context.args[0] if context.args else "permanent")
+    seconds = parse_duration(duration)
+    until = None if seconds is None else (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    state = group_state(update.effective_chat.id)
+    state["muted_until"][str(target.id)] = until or "permanent"
+    save_feature_data()
+    try:
+        await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=ChatPermissions(can_send_messages=False), until_date=None if seconds is None else datetime.now(timezone.utc) + timedelta(seconds=seconds))
+        await update.message.reply_text(f"🔇 {target.first_name} muted.")
+    except Exception as exc:
+        await update.message.reply_text(f"Mute saved, but Telegram rejected the restriction: {exc}")
+
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /unmute <user>.")
+        return
+    group_state(update.effective_chat.id)["muted_until"].pop(str(target.id), None)
+    save_feature_data()
+    try:
+        await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=ChatPermissions(can_send_messages=True, can_send_other_messages=True, can_add_web_page_previews=True))
+        await update.message.reply_text(f"🔊 {target.first_name} unmuted.")
+    except Exception as exc:
+        await update.message.reply_text(f"Mute record cleared, but Telegram rejected the change: {exc}")
+
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /ban <user>.")
+        return
+    try:
+        await context.bot.ban_chat_member(update.effective_chat.id, target.id)
+        await update.message.reply_text(f"🚫 {target.first_name} banned.")
+    except Exception as exc:
+        await update.message.reply_text(f"Could not ban that user: {exc}")
+
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /unban <user_id>.")
+        return
+    await context.bot.unban_chat_member(update.effective_chat.id, target.id, only_if_banned=True)
+    await update.message.reply_text("✅ User unbanned.")
+
+
+async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Reply to a user or use /kick <user>.")
+        return
+    await context.bot.ban_chat_member(update.effective_chat.id, target.id)
+    await context.bot.unban_chat_member(update.effective_chat.id, target.id)
+    await update.message.reply_text(f"👢 {target.first_name} kicked.")
+
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a message with /d to delete it.")
+        return
+    await context.bot.delete_message(update.effective_chat.id, update.message.reply_to_message.message_id)
+    await context.bot.delete_message(update.effective_chat.id, update.message.message_id)
+
+
+async def pin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a message with /pin.")
+        return
+    await context.bot.pin_chat_message(update.effective_chat.id, update.message.reply_to_message.message_id)
+    await update.message.reply_text("📌 Pinned.")
+
+
+async def restrict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    power = context.args[1] if update.message.reply_to_message and len(context.args) > 1 else (context.args[1] if len(context.args) > 1 else (context.args[0] if context.args else "messages"))
+    if not target:
+        await update.message.reply_text("Usage: /res <user> <power> or reply with /res <power>.")
+        return
+    permissions = {
+        "messages": ChatPermissions(can_send_messages=False),
+        "media": ChatPermissions(can_send_messages=True, can_send_media_messages=False),
+        "links": ChatPermissions(can_send_messages=True, can_add_web_page_previews=False),
+        "stickers": ChatPermissions(can_send_messages=True, can_send_other_messages=False),
+    }
+    selected = permissions.get(power.lower())
+    if not selected:
+        await update.message.reply_text("Power options: messages, media, links, stickers.")
+        return
+    await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=selected)
+    await update.message.reply_text(f"🔒 Restricted {target.first_name}: {power}.")
+
+
+async def promote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Usage: /promote <user> [0/1/2/3].")
+        return
+    level = int(context.args[1]) if not update.message.reply_to_message and len(context.args) > 1 else 1
+    level = max(0, min(3, level))
+    await context.bot.promote_chat_member(
+        update.effective_chat.id, target.id,
+        can_manage_chat=level >= 3,
+        can_delete_messages=level >= 2,
+        can_manage_video_chats=level >= 2,
+        can_restrict_members=level >= 1,
+        can_invite_users=level >= 1,
+        can_pin_messages=level >= 1,
+    )
+    await update.message.reply_text(f"⬆️ {target.first_name} promoted to level {level}.")
+
+
+async def demote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    if not target:
+        await update.message.reply_text("Usage: /demote <user>.")
+        return
+    await context.bot.promote_chat_member(update.effective_chat.id, target.id, can_manage_chat=False, can_delete_messages=False, can_manage_video_chats=False, can_restrict_members=False, can_invite_users=False, can_pin_messages=False)
+    await update.message.reply_text(f"⬇️ {target.first_name} demoted.")
+
+
+async def title_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update):
+        return
+    target = resolve_target(update)
+    title = context.args[1] if update.message.reply_to_message and len(context.args) > 1 else (" ".join(context.args[1:]) if len(context.args) > 1 else "")
+    if not target or not title:
+        await update.message.reply_text("Usage: /title <user> <title>, or reply with /title <title>.")
+        return
+    await context.bot.set_chat_administrator_custom_title(update.effective_chat.id, target.id, title[:16])
+    group_state(update.effective_chat.id)["titles"][str(target.id)] = title[:16]
+    save_feature_data()
+    await update.message.reply_text(f"🏷️ Custom title set for {target.first_name}.")
+
+
+async def setpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or len(context.args[0]) < 6:
+        await update.message.reply_text("Usage: /setpass <password> (minimum 6 characters)")
+        return
+    account_for(update.effective_user.id)["password_hash"] = password_hash(context.args[0])
+    save_feature_data()
+    await update.message.reply_text("🔒 Recovery password saved. Never share it.")
+
+
+async def mpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("For privacy, use /mpass in DM.")
+        return
+    saved = bool(account_for(update.effective_user.id).get("password_hash"))
+    await update.message.reply_text("🔒 A recovery password is set." if saved else "No recovery password is set.")
+
+
+async def cpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /cpass <old_password> <new_password>")
+        return
+    account = account_for(update.effective_user.id)
+    if account.get("password_hash") != password_hash(context.args[0]):
+        await update.message.reply_text("❌ Old password is incorrect.")
+        return
+    account["password_hash"] = password_hash(context.args[1])
+    save_feature_data()
+    await update.message.reply_text("✅ Recovery password changed.")
+
+
+async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    account = account_for(update.effective_user.id)
+    today = datetime.now(timezone.utc).date().isoformat()
+    if account.get("last_daily") == today:
+        await update.message.reply_text("⏳ Daily reward already claimed. Come back tomorrow.")
+        return
+    reward = 5000 if account.get("premium") else 2000
+    account["coins"] += reward
+    account["xp"] += 200 if account.get("premium") else 50
+    account["last_daily"] = today
+    save_feature_data()
+    await update.message.reply_text(f"🎁 Daily reward: +{reward} coins and +{account['xp']} XP.")
+
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    account = account_for(update.effective_user.id)
+    await update.message.reply_text(f"💰 Coins: {account['coins']}\n💎 Gems: {account['gems']}\n🏆 XP: {account['xp']}")
+
+
+async def pfp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    account = account_for(update.effective_user.id)
+    await update.message.reply_text(f"👤 {update.effective_user.first_name}\n💰 Coins: {account['coins']}\n💎 Gems: {account['gems']}\n⭐ Premium: {'Yes' if account.get('premium') else 'No'}")
+
+
+async def prefixed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    command, *args = text[1:].split()
+    context.args = args
+    handlers = {
+        "help": help_command, "baka": baka_command, "warn": warn_user,
+        "warns": warns_command, "unwarn": unwarn_command, "mute": mute_command,
+        "unmute": unmute_command, "ban": ban_command, "unban": unban_command,
+        "kick": kick_command, "d": delete_command, "pin": pin_command,
+        "res": restrict_command, "promote": promote_command,
+        "demote": demote_command, "title": title_command,
+        "daily": daily_command, "bal": balance_command, "pfp": pfp_command,
+    }
+    handler = handlers.get(command.lower())
+    if handler:
+        await handler(update, context)
+
+
 async def tell_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     joke = get_random_joke()
@@ -752,6 +1188,23 @@ async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🤔 {truth}")
 
 
+async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = " ".join(context.args).strip() or "friendship"
+    story = get_story_prompt(topic)
+    await update.message.reply_text(f"📖 {story}")
+
+
+async def poem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = " ".join(context.args).strip() or "rain"
+    poem = get_poem(topic)
+    await update.message.reply_text(f"🌷 {poem}")
+
+
+async def motivate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    line = get_motivation_line()
+    await update.message.reply_text(f"💪 {line}")
+
+
 async def flip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = random.choice(["Heads 🪙", "Tails 🪙"])
     await update.message.reply_text(f"Flip result: {result}")
@@ -779,14 +1232,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /fortune - Your fortune! 🔮
 /dare - Get a dare challenge
 /truth - Truth or dare question
+/story [topic] - Short story generator
+/poem [topic] - Short poetic lines
+/motivate - Uplifting motivation line
 /flip - Coin flip 🪙
 /dice - Dice roll 🎲
 /lovetest - Check love meter
 
 **📋 USER COMMANDS:**
 /clear - Clear chat history
+/profile - See your remembered profile
+/forgetme - Clear your saved memory
+/baka <user> <text> - Send a private whisper
+/daily, /bal, /pfp - Economy and profile
 /help - Show this help
 /myinfo - Your personal status
+
+**🛡️ GROUP MANAGEMENT:**
+Use `/warn`, `/warns`, `/unwarn`, `/mute`, `/unmute`, `/ban`, `/unban`, `/kick`, `/d`, and `/pin` as an admin. Reply to a message or provide a user ID/known username. `.` and `!` prefixes also work.
+
+**🔒 ACCOUNT RECOVERY:**
+/setpass, /mpass, /cpass
 
 **👑 ADMIN ONLY:**
 /admin - Admin control panel
@@ -815,6 +1281,33 @@ async def my_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ❤️ Lover: {is_lover}
 """
     await update.message.reply_text(info)
+
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    profile = get_user_profile(user_id)
+    if not profile or not profile.get("interaction_count"):
+        await update.message.reply_text("🧠 You are still a fresh connection for me. We can build your memory together.")
+        return
+
+    profile_text = f"""
+🧠 **YOUR MEMORY WITH NAINA**
+👤 Name: {profile.get('name', 'Unknown')}
+🌱 Nature: {profile.get('nature', 'Balanced')}
+💞 Bond: {profile.get('bond', 'friendly')}
+🎯 Interests: {', '.join(profile.get('interests', [])[:5]) or 'general chat'}
+📝 Key facts: {'. '.join(profile.get('important_facts', [])[:3]) or 'No saved facts yet'}
+💭 Emotional memory: {'. '.join(profile.get('emotional_memory', [])[:3]) or 'Warm and respectful conversation'}
+📊 Interactions: {profile.get('interaction_count', 0)}
+"""
+    await update.message.reply_text(profile_text)
+
+
+async def forget_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    clear_user_profile(user_id)
+    clear_conversation(user_id)
+    await update.message.reply_text("🧹 Your saved memory with Naina has been cleared. Let's start fresh, beautiful 💕")
 
 
 async def view_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,6 +1397,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     load_admin_data()
+    load_feature_data()
+    start_health_server()
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
@@ -915,8 +1410,8 @@ def main():
     application.add_handler(CommandHandler("resume", resume_bot))
     application.add_handler(CommandHandler("block", block_user))
     application.add_handler(CommandHandler("unblock", unblock_user))
-    application.add_handler(CommandHandler("mute", mute_user))
-    application.add_handler(CommandHandler("unmute", unmute_user))
+    application.add_handler(CommandHandler("mute", mute_command))
+    application.add_handler(CommandHandler("unmute", unmute_command))
     application.add_handler(CommandHandler("abuse", abuse_user))
     application.add_handler(CommandHandler("unabuse", unabuse_user))
     application.add_handler(CommandHandler("reset", reset_data))
@@ -942,17 +1437,49 @@ def main():
     application.add_handler(CommandHandler("fortune", fortune_command))
     application.add_handler(CommandHandler("dare", dare_command))
     application.add_handler(CommandHandler("truth", truth_command))
+    application.add_handler(CommandHandler("story", story_command))
+    application.add_handler(CommandHandler("poem", poem_command))
+    application.add_handler(CommandHandler("motivate", motivate_command))
     application.add_handler(CommandHandler("flip", flip_command))
     application.add_handler(CommandHandler("dice", dice_command))
     application.add_handler(CommandHandler("lovetest", love_test))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("myinfo", my_info))
+    application.add_handler(CommandHandler("profile", profile_command))
+    application.add_handler(CommandHandler("forgetme", forget_me_command))
     application.add_handler(CommandHandler("viewchat", view_chat))
     application.add_handler(CommandHandler("listusers", list_users))
     application.add_handler(CommandHandler("broadcast", broadcast_message))
     application.add_handler(CommandHandler("clear", clear_chat))
+    application.add_handler(CommandHandler("baka", baka_command))
+    application.add_handler(CommandHandler("warn", warn_user))
+    application.add_handler(CommandHandler("warns", warns_command))
+    application.add_handler(CommandHandler("unwarn", unwarn_command))
+    application.add_handler(CommandHandler("mute", mute_command))
+    application.add_handler(CommandHandler("unmute", unmute_command))
+    application.add_handler(CommandHandler("ban", ban_command))
+    application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CommandHandler("kick", kick_command))
+    application.add_handler(CommandHandler("d", delete_command))
+    application.add_handler(CommandHandler("pin", pin_command))
+    application.add_handler(CommandHandler("res", restrict_command))
+    application.add_handler(CommandHandler("promote", promote_command))
+    application.add_handler(CommandHandler("demote", demote_command))
+    application.add_handler(CommandHandler("title", title_command))
+    application.add_handler(CommandHandler("dmute", mute_command))
+    application.add_handler(CommandHandler("smute", mute_command))
+    application.add_handler(CommandHandler("dban", ban_command))
+    application.add_handler(CommandHandler("sban", ban_command))
+    application.add_handler(CommandHandler("skick", kick_command))
+    application.add_handler(CommandHandler("setpass", setpass_command))
+    application.add_handler(CommandHandler("mpass", mpass_command))
+    application.add_handler(CommandHandler("cpass", cpass_command))
+    application.add_handler(CommandHandler("daily", daily_command))
+    application.add_handler(CommandHandler("bal", balance_command))
+    application.add_handler(CommandHandler("pfp", pfp_command))
     application.add_handler(CallbackQueryHandler(handle_permission_callback))
     application.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
+    application.add_handler(MessageHandler(filters.Regex(r"^[.!][A-Za-z]+(?:\s|$)"), prefixed_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     application.add_error_handler(error_handler)
